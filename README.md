@@ -146,7 +146,7 @@ The release version defaults to the value in `internal/version`. Override it at 
 
 ```bash
 go build -trimpath \
-  -ldflags "-X github.com/zoro/byteforge/internal/version.Version=0.1.0" \
+  -ldflags "-X github.com/sidharth-v-s/byteforge/internal/version.Version=0.1.0" \
   -o dist/byteforge ./cmd/byteforge
 ```
 
@@ -154,7 +154,7 @@ For a stripped static build:
 
 ```bash
 CGO_ENABLED=0 go build -trimpath \
-  -ldflags "-s -w -X github.com/zoro/byteforge/internal/version.Version=0.1.0" \
+  -ldflags "-s -w -X github.com/sidharth-v-s/byteforge/internal/version.Version=0.1.0" \
   -o dist/byteforge ./cmd/byteforge
 ```
 
