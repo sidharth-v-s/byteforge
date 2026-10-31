@@ -1,0 +1,115 @@
+[
+  {
+    "name": "hex",
+    "inputHex": "0001027f80feff",
+    "encoded": "0001027F80FEFF",
+    "encodedHex": "3030303130323746383046454646"
+  },
+  {
+    "name": "base64",
+    "inputHex": "0001027f80feff",
+    "encoded": "AAECf4D+/w==",
+    "encodedHex": "414145436634442b2f773d3d"
+  },
+  {
+    "name": "base64url",
+    "inputHex": "0001027f80feff",
+    "encoded": "AAECf4D-_w==",
+    "encodedHex": "414145436634442d5f773d3d"
+  },
+  {
+    "name": "base32",
+    "inputHex": "0001027f80feff",
+    "encoded": "AAAQE74A737Q====",
+    "encodedHex": "4141415145373441373337513d3d3d3d"
+  },
+  {
+    "name": "ascii85",
+    "inputHex": "0001027f80feff",
+    "encoded": "!!*.NJH#Q",
+    "encodedHex": "21212a2e4e4a482351"
+  },
+  {
+    "name": "raw",
+    "inputHex": "0001027f80feff",
+    "encodedHex": "0001027f80feff"
+  },
+  {
+    "name": "decimal",
+    "inputHex": "0001027f80feff",
+    "encoded": "0 1 2 127 128 254 255",
+    "encodedHex": "302031203220313237203132382032353420323535"
+  },
+  {
+    "name": "octal",
+    "inputHex": "0001027f80feff",
+    "encoded": "000 001 002 177 200 376 377",
+    "encodedHex": "303030203030312030303220313737203230302033373620333737"
+  },
+  {
+    "name": "binary",
+    "inputHex": "0001027f80feff",
+    "encoded": "00000000 00000001 00000010 01111111 10000000 11111110 11111111",
+    "encodedHex": "3030303030303030203030303030303031203030303030303130203031313131313131203130303030303030203131313131313130203131313131313131"
+  },
+  {
+    "name": "c-escaped",
+    "inputHex": "0001027f80feff",
+    "encoded": "\"\\x00\\x01\\x02\\x7f\\x80\\xfe\\xff\"",
+    "encodedHex": "225c7830305c7830315c7830325c7837665c7838305c7866655c78666622"
+  },
+  {
+    "name": "unicode-escape",
+    "inputHex": "0001027f80feff",
+    "encoded": "\\u0000\\u0001\\u0002\\u007f\\u0080\\u00fe\\u00ff",
+    "encodedHex": "5c75303030305c75303030315c75303030325c75303037665c75303038305c75303066655c7530306666"
+  },
+  {
+    "name": "mac",
+    "inputHex": "001122aabbcc",
+    "encoded": "00:11:22:AA:BB:CC",
+    "encodedHex": "30303a31313a32323a41413a42423a4343"
+  },
+  {
+    "name": "ipv4",
+    "inputHex": "c0a80101",
+    "encoded": "192.168.1.1",
+    "encodedHex": "3139322e3136382e312e31"
+  },
+  {
+    "name": "ipv6",
+    "inputHex": "20010db8000000000000000000000001",
+    "encoded": "2001:db8::1",
+    "encodedHex": "323030313a6462383a3a31"
+  },
+  {
+    "name": "uuid",
+    "inputHex": "00112233445566778899aabbccddeeff",
+    "encoded": "00112233-4455-6677-8899-aabbccddeeff",
+    "encodedHex": "30303131323233332d343435352d363637372d383839392d616162626363646465656666"
+  },
+  {
+    "name": "mac-list",
+    "inputHex": "001122aabbccdeadbeef0001",
+    "encoded": "00:11:22:AA:BB:CC\nDE:AD:BE:EF:00:01",
+    "encodedHex": "30303a31313a32323a41413a42423a43430a44453a41443a42453a45463a30303a3031"
+  },
+  {
+    "name": "ipv4-list",
+    "inputHex": "c0a8010108080808",
+    "encoded": "192.168.1.1\n8.8.8.8",
+    "encodedHex": "3139322e3136382e312e310a382e382e382e38"
+  },
+  {
+    "name": "ipv6-list",
+    "inputHex": "20010db800000000000000000000000100000000000000000000000000000001",
+    "encoded": "2001:db8::1\n::1",
+    "encodedHex": "323030313a6462383a3a310a3a3a31"
+  },
+  {
+    "name": "uuid-list",
+    "inputHex": "00112233445566778899aabbccddeeffffeeddccbbaa99887766554433221100",
+    "encoded": "00112233-4455-6677-8899-aabbccddeeff\nffeeddcc-bbaa-9988-7766-554433221100",
+    "encodedHex": "30303131323233332d343435352d363637372d383839392d6161626263636464656566660a66666565646463632d626261612d393938382d373736362d353534343333323231313030"
+  }
+]

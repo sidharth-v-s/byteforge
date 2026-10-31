@@ -1,0 +1,60 @@
+# Compiled binaries and build output
+/dist/
+/byteforge
+/byteforge.exe
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Go build and test artifacts
+*.test
+*.out
+*.prof
+coverage.*
+*.coverprofile
+/vendor/
+/go.work
+/go.work.sum
+
+# Local output and scratch files
+/tmp/
+*.tmp
+*.temp
+*.log
+
+# Editor and IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.\#*
+.project
+.classpath
+*.code-workspace
+
+# OS metadata
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Dependency and module caches
+/.cache/
+/.gocache/
