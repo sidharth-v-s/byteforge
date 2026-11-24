@@ -40,8 +40,13 @@ func TestRoundTripAllCiphers(t *testing.T) {
 		t.Run(c.Info().Name, func(t *testing.T) {
 			key := keyFor(c)
 			nonce := nonceFor(c)
+			// Unauthenticated ciphers such as aes-256-cbc-raw have no AAD.
+			useAAD := aad
+			if c.TagSize() == 0 {
+				useAAD = nil
+			}
 			for _, pt := range payloads {
-				ct, tag, err := c.Encrypt(key, nonce, pt, aad)
+				ct, tag, err := c.Encrypt(key, nonce, pt, useAAD)
 				if err != nil {
 					t.Fatalf("encrypt %d bytes: %v", len(pt), err)
 				}
@@ -51,7 +56,7 @@ func TestRoundTripAllCiphers(t *testing.T) {
 				if len(tag) != c.TagSize() {
 					t.Fatalf("tag size %d, want %d", len(tag), c.TagSize())
 				}
-				got, err := c.Decrypt(key, nonce, ct, tag, aad)
+				got, err := c.Decrypt(key, nonce, ct, tag, useAAD)
 				if err != nil {
 					t.Fatalf("decrypt %d bytes: %v", len(pt), err)
 				}
@@ -69,6 +74,9 @@ func TestAuthenticationFailures(t *testing.T) {
 	for _, c := range All() {
 		c := c
 		t.Run(c.Info().Name, func(t *testing.T) {
+			if c.TagSize() == 0 {
+				t.Skip("unauthenticated cipher has no tag or AAD to tamper with")
+			}
 			key := keyFor(c)
 			nonce := nonceFor(c)
 			ct, tag, err := c.Encrypt(key, nonce, pt, aad)
@@ -129,8 +137,10 @@ func TestParameterValidation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := c.Decrypt(key, nonce, ct, tag[:len(tag)-1], nil); err == nil {
-			t.Fatalf("%s accepted a short tag", c.Info().Name)
+		if c.TagSize() > 0 {
+			if _, err := c.Decrypt(key, nonce, ct, tag[:len(tag)-1], nil); err == nil {
+				t.Fatalf("%s accepted a short tag", c.Info().Name)
+			}
 		}
 	}
 }
@@ -182,6 +192,7 @@ func TestRegistryIDsStable(t *testing.T) {
 		"aes-256-cbc":       IDAES256CBC,
 		"aes-256-ctr":       IDAES256CTR,
 		"rc4":               IDRC4,
+		"aes-256-cbc-raw":   IDAES256CBCRaw,
 	}
 	for name, id := range want {
 		got, ok := ID(name)

@@ -50,14 +50,14 @@ do not require network access after modules are downloaded.
 | Area | Files | What is exercised |
 | --- | --- | --- |
 | Codecs | `internal/codec/codec_test.go`, `internal/codec/typed_list_test.go`, `internal/codec/vectors_test.go` | Round trips, all 256 byte values, empty/small/large inputs, known outputs, typed lengths, typed sequences, invalid syntax, separators, UUID variants, published vectors |
-| Cryptography | `internal/cryptography/crypto_test.go`, `internal/cryptography/vectors_test.go` | Every cipher round trip across boundary lengths, wrong key/nonce/AAD/tag/ciphertext, parameter validation, NIST AES-GCM tags, CBC MAC-before-decrypt, stable IDs, KDF, RNG, golden containers |
-| Container | `internal/container/container_test.go` | Serialization, AAD layout, length validation, bad magic/version, flags/reserved, truncation, trailing data, oversized lengths, field bounds |
+| Cryptography | `internal/cryptography/crypto_test.go`, `internal/cryptography/raw_test.go`, `internal/cryptography/vectors_test.go` | Every cipher round trip across boundary lengths, wrong key/nonce/AAD/tag/ciphertext, parameter validation, NIST AES-GCM tags, CBC MAC-before-decrypt, raw CBC equivalence to standard AES-CBC, stable IDs, KDF, RNG, golden containers |
+| Container | `internal/container/container_test.go`, `internal/container/raw_test.go` | Serialization, AAD layout, raw payload encode/split, length validation, bad magic/version, flags/reserved, truncation, trailing data, oversized lengths, field bounds |
 | Renderers | `internal/renderer/render_test.go`, `internal/renderer/languages_test.go`, `internal/renderer/key_test.go` | Raw identity, hex/Base64 framing, C array syntax/symbol/width/empty behavior, C#/Nim/Go/PowerShell/VBA/VBS/Rust/JavaScript/Zig declarations, Python literal/identifier/empty behavior, JSON schema/data round trip, key declarations and JSON key object, no ANSI in payload, no loader constructs |
 | Transforms | `internal/transform/transform_test.go` | Known XOR vectors, involution, key bounds, empty input, metadata warnings |
 | Filesystem | `internal/fsutil/write_test.go` | Mode `0600`, no silent overwrite, forced replacement without temp leftovers, missing directory handling |
 | Input | `internal/input/input_test.go` | Missing/conflicting input, loose hex parsing, empty file preservation, missing file/directory, size limits |
 | Pipeline | Exercised through CLI | Ordered stages, first-failure stop, timings |
-| CLI | `internal/cli/cli_test.go` | Encode/decode round trip, no implicit input, overwrite protection, exit codes, password encrypt/decrypt, wrong password, tamper, generated key export, stdout purity, RC4 gate, inspect JSON, verify mismatch, formats groups, aliases, transform round trip |
+| CLI | `internal/cli/cli_test.go`, `internal/cli/raw_cli_test.go` | Encode/decode round trip, no implicit input, overwrite protection, exit codes, password encrypt/decrypt, wrong password, tamper, generated key export, stdout purity, RC4 gate, raw CBC/zero IV, raw-only gating, raw GCM tamper, inspect JSON, verify mismatch, formats groups, aliases, transform round trip |
 
 The `inspect` package is covered through CLI integration (`inspect --json` on a
 real container). The reporting package is covered indirectly through assertions
@@ -254,6 +254,15 @@ padded[:len(original)] == original                  always
 - A failed authentication writes no plaintext file.
 - `--force` overwrites; without it, the original file is untouched.
 - Legacy RC4 requires `--allow-legacy` for both encryption and decryption.
+- Raw mode (`--no-container`) rejects `--aad`, requires an explicit key and
+  `--cipher` at decryption, and cannot store `aes-256-cbc-raw`. Raw CBC output
+  matches standard AES-256-CBC with a direct key and PKCS#7 padding.
+- `--zero-iv` produces an all-zero IV and is mutually exclusive with `--nonce`.
+- Password-based raw encryption requires a key-capable renderer or
+  `--export-key`; the salt is not stored.
+- Raw mode with `aes-256-cbc`, `aes-256-ctr`, or `rc4` warns that the emitted
+  key is the HKDF base key, not the AES key. Direct-key CBC requires
+  `aes-256-cbc-raw`.
 - Padding is only applied when `--pad` or `--pad-to` is present; `--pad none`
   rejects misalignment and omitting padding flags preserves prior behavior.
 - On `encode`, `--pad` is limited to fixed-width codecs; other encodings warn
@@ -319,11 +328,21 @@ printf 'correct horse battery staple\n' | \
 printf 'correct horse battery staple\n' | \
   "$BIN" decrypt --file "$TMP/padded.bf" --password-stdin -o "$TMP/padded-plain.bin" --no-banner
 
+# Raw standard AES-256-CBC with a zero IV, then decrypt with the explicit key
+KEY=$(printf '11%.0s' {1..32})
+"$BIN" encrypt --file "$TMP/input.bin" --cipher aes-256-cbc-raw --key "$KEY" \
+  --no-container --zero-iv --allow-legacy -o "$TMP/raw.bin" --no-banner
+"$BIN" decrypt --file "$TMP/raw.bin" --cipher aes-256-cbc-raw --key "$KEY" \
+  --no-container --allow-legacy -o "$TMP/raw-plain.bin" --no-banner
+"$BIN" verify --original "$TMP/input.bin" --recovered "$TMP/raw-plain.bin" --no-banner
+
 # Expected failures
 printf 'wrong password\n' | "$BIN" decrypt --file "$TMP/sample.bf" --password-stdin -o "$TMP/nope.bin" --no-banner
 echo "wrong-password exit: $?"     # 4
 "$BIN" encrypt --file "$TMP/input.bin" --cipher rc4 --key "$(printf '11%.0s' {1..32})" -o "$TMP/rc4.bf" --no-banner
 echo "rc4 exit: $?"                # 2
+"$BIN" encrypt --file "$TMP/input.bin" --cipher aes-256-cbc-raw --key "$KEY" -o "$TMP/raw.bf" --no-banner
+echo "raw-without-no-container exit: $?"   # 2
 "$BIN" encode --encoding hex --no-banner
 echo "missing-input exit: $?"      # 2
 

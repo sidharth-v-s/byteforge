@@ -149,6 +149,8 @@ func (a *App) cmdEncrypt(args []string) error {
 		keySymbol   string
 		allowLegacy bool
 		noVerify    bool
+		noContainer bool
+		zeroIV      bool
 	}
 	fs := a.newFlagSet("encrypt", encryptUsage)
 	a.registerCommon(fs)
@@ -160,6 +162,8 @@ func (a *App) cmdEncrypt(args []string) error {
 	fs.StringVar(&f.exportKey, "export-key", "", "export key material to FILE (contains a secret)")
 	fs.StringVar(&f.keySymbol, "key-symbol", "key", "symbol name for the rendered key declaration")
 	fs.BoolVar(&f.allowLegacy, "allow-legacy", false, "permit legacy algorithms")
+	fs.BoolVar(&f.noContainer, "no-container", false, "emit nonce/IV || ciphertext || tag without the BFRG header")
+	fs.BoolVar(&f.zeroIV, "zero-iv", false, "use an all-zero nonce/IV (interoperability only)")
 	a.registerRenderFlags(fs, &f.render)
 	fs.BoolVar(&f.noVerify, "no-verify", false, "skip internal decrypt verification")
 	if err := a.parse(fs, args); err != nil {
@@ -178,6 +182,25 @@ func (a *App) cmdEncrypt(args []string) error {
 	}
 	if c.Info().Security == registry.SecurityLegacy {
 		a.rep.Warn("%s: %s", c.Info().Name, c.Info().Warning)
+	}
+	if f.noContainer {
+		switch c.Info().Name {
+		case "aes-256-cbc", "aes-256-ctr", "rc4":
+			a.rep.Warn("--no-container only removes BFRG framing; %s still derives AES/MAC subkeys with HKDF-SHA256 and appends a %d-byte HMAC tag. The emitted key is the base key, not the AES key. For standard direct-key CBC use --cipher aes-256-cbc-raw --allow-legacy.",
+				c.Info().Name, c.TagSize())
+		}
+	}
+	if f.zeroIV && f.nonceHex != "" {
+		return bferrors.New(bferrors.Usage, "--zero-iv and --nonce are mutually exclusive")
+	}
+	if f.noContainer && f.aad != "" {
+		return bferrors.New(bferrors.Usage,
+			"--aad is not available with --no-container; raw output has no BFRG header to bind it to")
+	}
+	if !f.noContainer && c.TagSize() <= 0 {
+		return bferrors.New(bferrors.Usage,
+			"cipher %s is raw-only (no authentication tag) and cannot be stored in a BFRG container; rerun with --no-container",
+			c.Info().Name)
 	}
 	if err := f.keys.validateCounts(); err != nil {
 		return err
@@ -220,7 +243,12 @@ func (a *App) cmdEncrypt(args []string) error {
 	if passSources > 0 && keySources > 0 {
 		return bferrors.New(bferrors.Usage, "choose either a password source or an explicit key, not both")
 	}
-	if passSources > 0 && f.exportKey != "" {
+	if f.noContainer && passSources == 1 && !keyCapable && f.exportKey == "" {
+		return bferrors.New(bferrors.Usage,
+			"--no-container does not store the KDF salt for password-based encryption; "+
+				"use a key-capable renderer, --export-key FILE, or an explicit key")
+	}
+	if passSources > 0 && f.exportKey != "" && !f.noContainer {
 		return bferrors.New(bferrors.Usage, "--export-key is not applicable to password-based encryption; the derived key is included automatically for key-capable renderers")
 	}
 
@@ -269,7 +297,11 @@ func (a *App) cmdEncrypt(args []string) error {
 	}
 
 	var nonce []byte
-	if f.nonceHex != "" {
+	switch {
+	case f.zeroIV:
+		nonce = make([]byte, c.NonceSize())
+		a.rep.Warn("using an all-zero nonce/IV; deterministic ciphertext requires a unique key per message")
+	case f.nonceHex != "":
 		nonce, err = bytesutil.ParseHex(f.nonceHex)
 		if err != nil {
 			return bferrors.Wrap(bferrors.Usage, err, "invalid --nonce")
@@ -278,29 +310,43 @@ func (a *App) cmdEncrypt(args []string) error {
 			return bferrors.New(bferrors.Usage, "%s requires a %d-byte nonce, got %d bytes", c.Info().Name, c.NonceSize(), len(nonce))
 		}
 		a.rep.Warn("using an explicit nonce; never reuse a nonce with the same key")
-	} else {
+	default:
 		nonce, err = cryptography.RandomBytes(c.NonceSize())
 		if err != nil {
 			return err
 		}
 	}
 
-	cipherID, ok := cryptography.ID(c.Info().Name)
-	if !ok {
-		return bferrors.New(bferrors.Processing, "internal error: cipher %s has no container id", c.Info().Name)
-	}
-	h, err := container.NewHeader(cipherID, kdfID, salt, nonce, c.CiphertextLen(len(plaintext)), c.TagSize())
-	if err != nil {
-		return err
-	}
-	aad := h.AAD([]byte(f.aad))
-	ct, tag, err := c.Encrypt(key, nonce, plaintext, aad)
-	if err != nil {
-		return err
-	}
-	blob, err := h.Encode(ct, tag)
-	if err != nil {
-		return err
+	var (
+		blob []byte
+		aad  []byte
+		ct   []byte
+		tag  []byte
+	)
+	if f.noContainer {
+		ct, tag, err = c.Encrypt(key, nonce, plaintext, nil)
+		if err != nil {
+			return err
+		}
+		blob = container.EncodeRaw(nonce, ct, tag)
+	} else {
+		cipherID, ok := cryptography.ID(c.Info().Name)
+		if !ok {
+			return bferrors.New(bferrors.Processing, "internal error: cipher %s has no container id", c.Info().Name)
+		}
+		h, err := container.NewHeader(cipherID, kdfID, salt, nonce, c.CiphertextLen(len(plaintext)), c.TagSize())
+		if err != nil {
+			return err
+		}
+		aad = h.AAD([]byte(f.aad))
+		ct, tag, err = c.Encrypt(key, nonce, plaintext, aad)
+		if err != nil {
+			return err
+		}
+		blob, err = h.Encode(ct, tag)
+		if err != nil {
+			return err
+		}
 	}
 
 	verification := "SKIPPED"
@@ -343,7 +389,11 @@ func (a *App) cmdEncrypt(args []string) error {
 	}
 
 	a.verboseDetails("Plaintext", plaintext, nil)
-	a.verboseDetails("Container", blob, nil)
+	if f.noContainer {
+		a.verboseDetails("Raw payload", blob, nil)
+	} else {
+		a.verboseDetails("Container", blob, nil)
+	}
 	a.rep.Debug("nonce (not secret, unique per encryption): %s", hex.EncodeToString(nonce))
 	if generated {
 		if keyCapable {
@@ -353,18 +403,31 @@ func (a *App) cmdEncrypt(args []string) error {
 		}
 	}
 
+	layout := fmt.Sprintf("BFRG v%d", container.Version)
+	sizeKey := "Container size"
+	shaKey := "Container SHA-256"
+	kdfValue := cryptography.KDFName(kdfID)
+	if f.noContainer {
+		layout = "none (raw)"
+		sizeKey = "Raw size"
+		shaKey = "Raw SHA-256"
+		if passSources == 1 {
+			kdfValue = "scrypt-sha256 (salt not stored; use the exported/embedded key)"
+		}
+	}
+
 	fields := []reporting.Field{
 		{Key: "Operation", Value: "encrypt"},
 		{Key: "Cipher", Value: c.Info().Name},
-		{Key: "KDF", Value: cryptography.KDFName(kdfID)},
+		{Key: "KDF", Value: kdfValue},
 		{Key: "Key source", Value: keySource},
-		{Key: "Container", Value: fmt.Sprintf("BFRG v%d", container.Version)},
+		{Key: "Container", Value: layout},
 		{Key: "Input size", Value: fmt.Sprintf("%d bytes", len(src.Data))},
-		{Key: "Container size", Value: fmt.Sprintf("%d bytes", len(blob))},
+		{Key: sizeKey, Value: fmt.Sprintf("%d bytes", len(blob))},
 		{Key: "Output size", Value: fmt.Sprintf("%d bytes", len(out))},
 		{Key: "Size delta", Value: delta(len(plaintext), len(blob))},
 		{Key: "Input SHA-256", Value: sha256Hex(src.Data)},
-		{Key: "Container SHA-256", Value: sha256Hex(blob)},
+		{Key: shaKey, Value: sha256Hex(blob)},
 		{Key: "Output SHA-256", Value: sha256Hex(out)},
 		{Key: "Verification", Value: verification},
 		{Key: "Output file", Value: path},
@@ -398,16 +461,20 @@ func (a *App) cmdDecrypt(args []string) error {
 		input       inputFlags
 		render      renderFlags
 		keys        keyFlags
+		cipherName  string
 		aad         string
 		allowLegacy bool
 		noVerify    bool
+		noContainer bool
 	}
 	fs := a.newFlagSet("decrypt", decryptUsage)
 	a.registerCommon(fs)
 	a.registerInputFlags(fs, &f.input)
 	a.registerKeyFlags(fs, &f.keys)
+	fs.StringVar(&f.cipherName, "cipher", "", "cipher identifier (required with --no-container)")
 	fs.StringVar(&f.aad, "aad", "", "additional authenticated data used at encryption")
 	fs.BoolVar(&f.allowLegacy, "allow-legacy", false, "permit legacy algorithms")
+	fs.BoolVar(&f.noContainer, "no-container", false, "treat input as raw nonce/IV || ciphertext || tag (no BFRG header)")
 	a.registerRenderFlags(fs, &f.render)
 	fs.BoolVar(&f.noVerify, "no-verify", false, "skip re-encryption verification")
 	if err := a.parse(fs, args); err != nil {
@@ -429,34 +496,44 @@ func (a *App) cmdDecrypt(args []string) error {
 		return err
 	}
 
-	parsed, err := container.Parse(src.Data, int(a.common.MaxInput))
-	if err != nil {
-		return err
-	}
-	c, ok := cryptography.ByID(parsed.Header.CipherID)
-	if !ok {
-		return bferrors.New(bferrors.Usage, "container uses unsupported cipher id %d", parsed.Header.CipherID)
-	}
-	if c.Info().Security == registry.SecurityLegacy && !f.allowLegacy {
-		return bferrors.New(bferrors.Usage,
-			"container uses legacy cipher %s, disabled by default (rerun with --allow-legacy if you accept the risk)",
-			c.Info().Name)
-	}
-	if c.Info().Security == registry.SecurityLegacy {
-		a.rep.Warn("%s: %s", c.Info().Name, c.Info().Warning)
-	}
-
+	var (
+		c              registry.Cipher
+		ok             bool
+		key            []byte
+		nonce, ct, tag []byte
+		aad            []byte
+		kdfID          byte
+		containerLabel string
+	)
 	passSources, keySources := f.keys.counts()
-	var key []byte
-	switch parsed.Header.KDFID {
-	case cryptography.KDFNone:
+	if f.noContainer {
+		if f.aad != "" {
+			return bferrors.New(bferrors.Usage,
+				"--aad is not available with --no-container; raw input has no BFRG header to bind it to")
+		}
+		if f.cipherName == "" {
+			return bferrors.New(bferrors.Usage,
+				"--cipher is required with --no-container; raw input carries no cipher identifier")
+		}
+		c, ok = cryptography.Get(f.cipherName)
+		if !ok {
+			return unknownName("cipher", f.cipherName, cryptography.Names())
+		}
+		if c.Info().Security == registry.SecurityLegacy && !f.allowLegacy {
+			return bferrors.New(bferrors.Usage,
+				"cipher %s is legacy and disabled by default: %s (rerun with --allow-legacy if you accept the risk)",
+				c.Info().Name, c.Info().Warning)
+		}
+		if c.Info().Security == registry.SecurityLegacy {
+			a.rep.Warn("%s: %s", c.Info().Name, c.Info().Warning)
+		}
 		if passSources > 0 {
 			return bferrors.New(bferrors.Usage,
-				"container is not password-protected; provide --key HEX or --key-file FILE")
+				"raw input has no KDF salt; provide --key HEX or --key-file FILE (the key used at encryption)")
 		}
 		if keySources != 1 {
 			return bferrors.New(bferrors.Usage,
-				"container is not password-protected; provide --key HEX or --key-file FILE")
+				"raw input requires an explicit key: provide --key HEX or --key-file FILE")
 		}
 		key, err = a.readExplicitKey(&f.keys)
 		if err != nil {
@@ -465,30 +542,80 @@ func (a *App) cmdDecrypt(args []string) error {
 		if err := requireKeySize(c, key); err != nil {
 			return err
 		}
-	case cryptography.KDFScryptSHA256:
-		if keySources > 0 {
-			return bferrors.New(bferrors.Usage,
-				"container is password-protected; provide --password, --password-file, or --password-stdin (not an explicit key)")
-		}
-		if passSources != 1 {
-			return bferrors.New(bferrors.Usage,
-				"container is password-protected; provide --password, --password-file, or --password-stdin")
-		}
-		password, err := a.readPassword(&f.keys)
+		nonce, ct, tag, err = container.SplitRaw(src.Data, c.NonceSize(), c.TagSize())
 		if err != nil {
 			return err
 		}
-		key, err = cryptography.DeriveKeySize(password, parsed.Header.Salt, c.KeySize())
+		kdfID = cryptography.KDFNone
+		containerLabel = "none (raw)"
+	} else {
+		if f.cipherName != "" {
+			return bferrors.New(bferrors.Usage,
+				"--cipher is only used with --no-container; BFRG containers identify their cipher")
+		}
+		parsed, err := container.Parse(src.Data, int(a.common.MaxInput))
 		if err != nil {
 			return err
 		}
-	default:
-		return bferrors.New(bferrors.Usage,
-			"container uses unsupported KDF id %d (this build supports none and scrypt-sha256)", parsed.Header.KDFID)
+		c, ok = cryptography.ByID(parsed.Header.CipherID)
+		if !ok {
+			return bferrors.New(bferrors.Usage, "container uses unsupported cipher id %d", parsed.Header.CipherID)
+		}
+		if c.Info().Security == registry.SecurityLegacy && !f.allowLegacy {
+			return bferrors.New(bferrors.Usage,
+				"container uses legacy cipher %s, disabled by default (rerun with --allow-legacy if you accept the risk)",
+				c.Info().Name)
+		}
+		if c.Info().Security == registry.SecurityLegacy {
+			a.rep.Warn("%s: %s", c.Info().Name, c.Info().Warning)
+		}
+		switch parsed.Header.KDFID {
+		case cryptography.KDFNone:
+			if passSources > 0 {
+				return bferrors.New(bferrors.Usage,
+					"container is not password-protected; provide --key HEX or --key-file FILE")
+			}
+			if keySources != 1 {
+				return bferrors.New(bferrors.Usage,
+					"container is not password-protected; provide --key HEX or --key-file FILE")
+			}
+			key, err = a.readExplicitKey(&f.keys)
+			if err != nil {
+				return err
+			}
+			if err := requireKeySize(c, key); err != nil {
+				return err
+			}
+		case cryptography.KDFScryptSHA256:
+			if keySources > 0 {
+				return bferrors.New(bferrors.Usage,
+					"container is password-protected; provide --password, --password-file, or --password-stdin (not an explicit key)")
+			}
+			if passSources != 1 {
+				return bferrors.New(bferrors.Usage,
+					"container is password-protected; provide --password, --password-file, or --password-stdin")
+			}
+			password, err := a.readPassword(&f.keys)
+			if err != nil {
+				return err
+			}
+			key, err = cryptography.DeriveKeySize(password, parsed.Header.Salt, c.KeySize())
+			if err != nil {
+				return err
+			}
+		default:
+			return bferrors.New(bferrors.Usage,
+				"container uses unsupported KDF id %d (this build supports none and scrypt-sha256)", parsed.Header.KDFID)
+		}
+		nonce = parsed.Header.Nonce
+		ct = parsed.Ciphertext
+		tag = parsed.Tag
+		aad = parsed.AAD([]byte(f.aad))
+		kdfID = parsed.Header.KDFID
+		containerLabel = fmt.Sprintf("BFRG v%d", parsed.Header.Version)
 	}
 
-	aad := parsed.AAD([]byte(f.aad))
-	plain, err := c.Decrypt(key, parsed.Header.Nonce, parsed.Ciphertext, parsed.Tag, aad)
+	plain, err := c.Decrypt(key, nonce, ct, tag, aad)
 	if err != nil {
 		// Do not write anything on authentication failure.
 		return bferrors.Wrap(bferrors.Verification, err, "decryption failed")
@@ -496,11 +623,11 @@ func (a *App) cmdDecrypt(args []string) error {
 
 	verification := "SKIPPED"
 	if !f.noVerify {
-		ct2, tag2, vErr := c.Encrypt(key, parsed.Header.Nonce, plain, aad)
+		ct2, tag2, vErr := c.Encrypt(key, nonce, plain, aad)
 		if vErr != nil {
 			return bferrors.Wrap(bferrors.Verification, vErr, "re-encryption verification failed")
 		}
-		if !bytes.Equal(ct2, parsed.Ciphertext) || !bytes.Equal(tag2, parsed.Tag) {
+		if !bytes.Equal(ct2, ct) || !bytes.Equal(tag2, tag) {
 			return bferrors.New(bferrors.Verification, "re-encryption verification failed: ciphertext differs")
 		}
 		verification = "PASSED"
@@ -521,14 +648,18 @@ func (a *App) cmdDecrypt(args []string) error {
 		return err
 	}
 
-	a.verboseDetails("Container", src.Data, nil)
+	if f.noContainer {
+		a.verboseDetails("Raw payload", src.Data, nil)
+	} else {
+		a.verboseDetails("Container", src.Data, nil)
+	}
 	a.verboseDetails("Plaintext", plain, nil)
 
 	fields := []reporting.Field{
 		{Key: "Operation", Value: "decrypt"},
 		{Key: "Cipher", Value: c.Info().Name},
-		{Key: "KDF", Value: cryptography.KDFName(parsed.Header.KDFID)},
-		{Key: "Container", Value: fmt.Sprintf("BFRG v%d", parsed.Header.Version)},
+		{Key: "KDF", Value: cryptography.KDFName(kdfID)},
+		{Key: "Container", Value: containerLabel},
 		{Key: "Input size", Value: fmt.Sprintf("%d bytes", len(src.Data))},
 		{Key: "Plaintext size", Value: fmt.Sprintf("%d bytes", len(plain))},
 		{Key: "Output size", Value: fmt.Sprintf("%d bytes", len(out))},

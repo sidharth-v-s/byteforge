@@ -30,6 +30,9 @@ const (
 	IDAES256CBC    byte = 4
 	IDAES256CTR    byte = 5
 	IDRC4          byte = 6
+	// IDAES256CBCRaw is reserved for the raw-only standard CBC interop mode.
+	// It is never written to a BFRG container because it has no tag.
+	IDAES256CBCRaw byte = 7
 )
 
 var (

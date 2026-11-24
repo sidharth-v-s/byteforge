@@ -9,8 +9,8 @@ Commands:
   formats      List supported codecs, transforms, ciphers, and renderers
   encode       Encode input with a representation codec
   decode       Decode a representation back to bytes
-  encrypt      Encrypt input into a versioned ByteForge container
-  decrypt      Decrypt a ByteForge container
+  encrypt      Encrypt input into a BFRG container or raw payload
+  decrypt      Decrypt a BFRG container or raw payload
   transform    Apply a reversible XOR transform
   untransform  Apply the same XOR transform (XOR is symmetric)
   inspect      Show size, hashes, entropy, and container metadata
@@ -57,6 +57,7 @@ Examples:
   byteforge decode --file payload.txt --encoding base64 --output recovered.bin
   byteforge encrypt --file input.bin --password-stdin --output sample.bf
   byteforge decrypt --file sample.bf --password-stdin --output recovered.bin
+  byteforge encrypt --file calc.bin --cipher aes-256-cbc-raw --key HEX --no-container --allow-legacy --renderer c-array --output payload.c
   byteforge encode --file address.bin --encoding ipv4
   byteforge formats
 `
@@ -127,7 +128,8 @@ Examples:
 
 const encryptUsage = `Usage: byteforge encrypt [options]
 
-Encrypt raw input into a versioned ByteForge container (BFRG v1).
+Encrypt raw input into a versioned ByteForge container (BFRG v1), or into a
+raw payload with --no-container.
 
 Key sources (choose one):
       --password TEXT       Password (WARNING: visible in the process list)
@@ -150,10 +152,13 @@ Options:
   -f, --file FILE         Input file
   -s, --hex HEX           Input as a hexadecimal string
       --cipher NAME       aes-256-gcm (default) | aes-128-gcm | chacha20-poly1305
-                          | aes-256-cbc | aes-256-ctr | rc4
+                          | aes-256-cbc | aes-256-ctr | rc4 | aes-256-cbc-raw
       --nonce HEX         Explicit nonce/IV (tests/interoperability only)
+      --zero-iv           Use an all-zero nonce/IV (interoperability only;
+                          mutually exclusive with --nonce)
       --aad TEXT          Additional authenticated data (must be repeated at decrypt)
-      --allow-legacy      Permit legacy algorithms (currently rc4)
+      --allow-legacy      Permit legacy algorithms (rc4, aes-256-cbc-raw)
+      --no-container      Emit nonce/IV || ciphertext || tag without BFRG framing
       --renderer NAME     Output renderer (default: raw; see 'byteforge formats')
       --symbol NAME       Symbol for data-declaration renderers
       --bytes-per-line N  Bytes per line (default: 16)
@@ -169,17 +174,30 @@ Options:
       --timestamp         Include a timestamp in reports
       --max-input N       Maximum input bytes (default: 64 MiB)
 
+Raw mode (--no-container):
+  The output is nonce/IV || ciphertext || tag, with no BFRG header, cipher id,
+  or KDF salt. Decryption needs --no-container --cipher NAME and an explicit
+  --key/--key-file. --aad is rejected because raw output cannot bind a header.
+
+  aes-256-cbc-raw is standard AES-256-CBC: the 32-byte key is used directly
+  (no HKDF), the IV is prefixed, padding is PKCS#7, and there is no HMAC tag.
+  It is classified legacy, requires --allow-legacy, and cannot be stored in a
+  container. With a password, use a key-capable renderer or --export-key so the
+  derived key remains recoverable after the salt is discarded.
+
 Examples:
   byteforge encrypt --file input.bin --password-stdin --output sample.bf
   printf 'correct horse battery staple' | byteforge encrypt --file input.bin --password-stdin --output sample.bf
   byteforge encrypt --file input.bin --key 000102...1f --output sample.bf
   byteforge encrypt --file input.bin --password-stdin --renderer c-array --output sample.c
   byteforge encrypt --file input.bin --password-stdin --renderer javascript-array --output payload.js
+  byteforge encrypt --file calc.bin --cipher aes-256-cbc-raw --key HEX --no-container --zero-iv --allow-legacy --renderer c-array --output payload.c
 `
 
 const decryptUsage = `Usage: byteforge decrypt [options]
 
-Decrypt a versioned ByteForge container (BFRG v1).
+Decrypt a versioned ByteForge container (BFRG v1), or a raw payload produced
+with --no-container.
 
 Options:
   -f, --file FILE         Encrypted container file
@@ -189,8 +207,11 @@ Options:
       --password-stdin    Read the password from stdin
       --key HEX           Explicit key as hex
       --key-file FILE     Read the explicit key as hex from FILE
+      --cipher NAME       Cipher used to produce raw input (required with
+                          --no-container; containers identify their own cipher)
+      --no-container      Treat input as raw nonce/IV || ciphertext || tag
       --aad TEXT          Additional authenticated data used at encryption
-      --allow-legacy      Permit legacy algorithms (currently rc4)
+      --allow-legacy      Permit legacy algorithms (rc4, aes-256-cbc-raw)
       --renderer NAME     Output renderer (default: raw; see 'byteforge formats')
       --symbol NAME       Symbol for data-declaration renderers
       --bytes-per-line N  Bytes per line (default: 16)
@@ -206,11 +227,17 @@ Options:
       --timestamp         Include a timestamp in reports
       --max-input N       Maximum input bytes (default: 64 MiB)
 
-Authentication is verified before any plaintext is returned or written.
+Authenticated ciphers verify before any plaintext is returned or written.
+Raw aes-256-cbc-raw has no authentication tag; decryption only validates block
+length and PKCS#7 padding, so treat raw CBC output as untrusted input.
+
+Raw mode needs an explicit key because the KDF salt is not stored:
+  byteforge decrypt --file raw.bin --cipher aes-256-cbc-raw --key HEX --no-container --allow-legacy --output recovered.bin
 
 Examples:
   byteforge decrypt --file sample.bf --password-stdin --output recovered.bin
   byteforge decrypt --file sample.bf --key 000102...1f --output recovered.bin
+  byteforge decrypt --file raw.bin --cipher aes-256-cbc-raw --key HEX --no-container --allow-legacy --output recovered.bin
 `
 
 const transformUsage = `Usage: byteforge transform [options]

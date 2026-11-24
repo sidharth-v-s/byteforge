@@ -108,6 +108,23 @@ that expect bare CBC/CTR, and they should not be preferred over AES-GCM. RC4 is
 obsolete, disabled by default, and must be enabled with `--allow-legacy`; even
 with HMAC protection, it is not recommended.
 
+### Raw unauthenticated CBC
+
+`aes-256-cbc-raw` exists only for interoperability with consumers that require
+standard AES-256-CBC. It uses the 32-byte key directly, prefixes a 16-byte IV,
+applies PKCS#7 padding, and appends no tag. It requires `--no-container` and
+`--allow-legacy`.
+
+This mode has no integrity protection and no authentication. Modified
+ciphertext, a wrong key, or a modified IV can produce garbage that is returned
+as plaintext if the padding happens to be valid. There is no MAC to check
+first, so padding behavior is observable to an attacker. Raw output also has no
+stored salt, so password-based encryption must embed or export the derived key
+and decryption requires an explicit key.
+
+Use raw CBC only when a specific consumer cannot be changed. Never use it as a
+default or for new sensitive data.
+
 ### Key derivation
 
 Password-based encryption uses scrypt with N=2^15, r=8, p=1, a 16-byte random

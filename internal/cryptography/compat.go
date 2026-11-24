@@ -26,6 +26,7 @@ func registerCompatibility() {
 	Register(&cbcCipher{}, IDAES256CBC)
 	Register(&ctrCipher{}, IDAES256CTR)
 	Register(&rc4Cipher{}, IDRC4)
+	Register(&rawCBCCipher{}, IDAES256CBCRaw)
 }
 
 // deriveKeys expands key material into independent encryption and MAC keys.
@@ -134,6 +135,84 @@ func (cbcCipher) Decrypt(key, nonce, ciphertext, tag, aad []byte) ([]byte, error
 	out, err := pkcs7Unpad(plain, aes.BlockSize)
 	if err != nil {
 		return nil, bferrors.Wrap(bferrors.Verification, err, "aes-256-cbc: invalid padding")
+	}
+	return out, nil
+}
+
+// ---------------------------------------------------------------- AES-256-CBC raw interop
+
+// rawCBCCipher implements plain AES-256-CBC with PKCS#7 padding. It uses the
+// supplied key directly (no HKDF subkeys) and has no authentication tag, which
+// matches APIs that expect standard CBC ciphertext. It is raw-only: tag size 0
+// means it cannot be stored in a BFRG container.
+type rawCBCCipher struct{}
+
+func (rawCBCCipher) Info() registry.Info {
+	return registry.Info{
+		Name:        "aes-256-cbc-raw",
+		Description: "Standard AES-256-CBC with PKCS#7 padding (unauthenticated; raw interop only)",
+		Security:    registry.SecurityLegacy,
+		Reversible:  true,
+		Input:       "any bytes",
+		Output:      "raw CBC ciphertext",
+		Parameters: []string{
+			"key: 32 bytes (used directly; no HKDF)",
+			"IV: 16 bytes",
+			"padding: PKCS#7",
+			"authentication: none",
+			"requires --no-container",
+		},
+		Warning: "unauthenticated raw CBC is for interoperability only; prefer aes-256-gcm",
+	}
+}
+
+func (rawCBCCipher) KeySize() int   { return 32 }
+func (rawCBCCipher) NonceSize() int { return aes.BlockSize }
+func (rawCBCCipher) TagSize() int   { return 0 }
+
+func (rawCBCCipher) CiphertextLen(plaintextLen int) int {
+	return (plaintextLen/aes.BlockSize + 1) * aes.BlockSize
+}
+
+func (rawCBCCipher) Encrypt(key, nonce, plaintext, aad []byte) ([]byte, []byte, error) {
+	if len(aad) != 0 {
+		return nil, nil, bferrors.New(bferrors.Usage, "aes-256-cbc-raw does not support --aad")
+	}
+	if err := checkKeyNonce("aes-256-cbc-raw", key, nonce, 32, aes.BlockSize); err != nil {
+		return nil, nil, err
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, nil, bferrors.Wrap(bferrors.Processing, err, "initializing aes-256-cbc-raw")
+	}
+	padded := pkcs7Pad(plaintext, aes.BlockSize)
+	ct := make([]byte, len(padded))
+	cipher.NewCBCEncrypter(block, nonce).CryptBlocks(ct, padded)
+	return ct, nil, nil
+}
+
+func (rawCBCCipher) Decrypt(key, nonce, ciphertext, tag, aad []byte) ([]byte, error) {
+	if len(aad) != 0 {
+		return nil, bferrors.New(bferrors.Usage, "aes-256-cbc-raw does not support --aad")
+	}
+	if len(tag) != 0 {
+		return nil, bferrors.New(bferrors.Verification, "aes-256-cbc-raw does not carry an authentication tag")
+	}
+	if err := checkKeyNonce("aes-256-cbc-raw", key, nonce, 32, aes.BlockSize); err != nil {
+		return nil, err
+	}
+	if len(ciphertext) == 0 || len(ciphertext)%aes.BlockSize != 0 {
+		return nil, bferrors.New(bferrors.Verification, "aes-256-cbc-raw: ciphertext length is not a multiple of the block size")
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, bferrors.Wrap(bferrors.Processing, err, "initializing aes-256-cbc-raw")
+	}
+	plain := make([]byte, len(ciphertext))
+	cipher.NewCBCDecrypter(block, nonce).CryptBlocks(plain, ciphertext)
+	out, err := pkcs7Unpad(plain, aes.BlockSize)
+	if err != nil {
+		return nil, bferrors.Wrap(bferrors.Verification, err, "aes-256-cbc-raw: invalid padding")
 	}
 	return out, nil
 }

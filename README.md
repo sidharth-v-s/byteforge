@@ -62,7 +62,8 @@ network connection.
 - **Authenticated encryption by default.** AES-256-GCM is the default; AES-128-GCM and
   ChaCha20-Poly1305 are also available.
 - **Strict, self-describing containers.** Encrypted data uses the versioned `BFRG` v1 format,
-  authenticated end to end.
+  authenticated end to end. `--no-container` optionally emits a raw `nonce/IV || ciphertext || tag`
+  payload for interoperability.
 - **Lossless typed codecs.** MAC, IPv4, IPv6, UUID, and their `-list` variants round-trip exactly
   or fail with a clear error — no guessing, no silent truncation.
 - **Explicit padding only.** `--pad` is opt-in, reported in diagnostics, and never inferred.
@@ -243,7 +244,8 @@ input bytes
 - **Renderers** format bytes for display or embedding. They never execute the data.
 
 Encryption output is a binary container unless a key-capable renderer is selected, in which case
-the container bytes (and the key) are emitted as a language declaration.
+the container bytes (and the key) are emitted as a language declaration. `--no-container` replaces
+the container with the raw cipher output (`nonce/IV || ciphertext || tag`).
 
 ## Command reference
 
@@ -341,11 +343,12 @@ byteforge decode --file payload.hex --encoding hex
 byteforge encrypt [key source] [options]
 ```
 
-Encrypts input into a versioned `BFRG` v1 container.
+Encrypts input into a versioned `BFRG` v1 container. With `--no-container`, writes a raw
+`nonce/IV || ciphertext || tag` payload instead.
 
 | Option                 | Description                                                                                      |
 | ---------------------- | ------------------------------------------------------------------------------------------------ |
-| `--cipher NAME`        | `aes-256-gcm` (default), `aes-128-gcm`, `chacha20-poly1305`, `aes-256-cbc`, `aes-256-ctr`, `rc4` |
+| `--cipher NAME`        | `aes-256-gcm` (default), `aes-128-gcm`, `chacha20-poly1305`, `aes-256-cbc`, `aes-256-ctr`, `rc4`, `aes-256-cbc-raw` |
 | `--password TEXT`      | Password (visible in the process list; avoid)                                                    |
 | `--password-file FILE` | Read the password from a file                                                                    |
 | `--password-stdin`     | Read the password from stdin                                                                     |
@@ -354,8 +357,10 @@ Encrypts input into a versioned `BFRG` v1 container.
 | `--export-key FILE`    | Export the key (opt-in; contains a secret)                                                       |
 | `--key-symbol NAME`    | Symbol for the rendered key declaration (default: `key`)                                         |
 | `--nonce HEX`          | Explicit nonce/IV (tests and interoperability only)                                              |
+| `--zero-iv`            | Use an all-zero nonce/IV (interoperability only; not with `--nonce`)                             |
 | `--aad TEXT`           | Additional authenticated data (repeat at decrypt)                                                |
-| `--allow-legacy`       | Permit legacy algorithms (currently `rc4`)                                                       |
+| `--no-container`       | Omit BFRG framing and emit the raw nonce/IV, ciphertext, and tag                                 |
+| `--allow-legacy`       | Permit legacy algorithms (`rc4`, `aes-256-cbc-raw`)                                              |
 | `--pad MODE`           | Pad the plaintext before encryption                                                              |
 | `--pad-to N`           | Padding multiple (default: 16)                                                                   |
 | `--no-verify`          | Skip the internal decrypt verification                                                           |
@@ -363,6 +368,21 @@ Encrypts input into a versioned `BFRG` v1 container.
 Choose exactly one key source: a password source or an explicit key. If neither is supplied,
 ByteForge generates a random key. Key-capable renderers include the generated key automatically;
 `raw`, `hex`, and `base64` require `--export-key FILE`.
+
+`--no-container` emits `nonce/IV || ciphertext || tag` without the BFRG header. Raw output has no
+cipher identifier, KDF salt, or AAD, so decrypt it with `--no-container --cipher NAME` and an
+explicit `--key`/`--key-file`. `--aad` is rejected in raw mode. Password-based raw encryption
+requires a key-capable renderer or `--export-key FILE`, because the salt is not stored.
+
+Raw mode only removes framing; it does not change cipher semantics. `aes-256-cbc`, `aes-256-ctr`,
+and `rc4` still derive AES/MAC subkeys with HKDF-SHA256 and append an HMAC tag, so their emitted
+key is the base key, not the AES key. Use `aes-256-cbc-raw` when a consumer such as WinCrypt needs
+the key used directly for standard CBC.
+
+`aes-256-cbc-raw` is standard AES-256-CBC for interoperability: the 32-byte key is used directly,
+the 16-byte IV is prefixed, padding is PKCS#7, and there is no HMAC tag. It requires
+`--no-container` and `--allow-legacy`, and its output is exactly `IV || ciphertext`. It is
+unauthenticated; prefer `aes-256-gcm` for new data.
 
 ```bash
 # Password from stdin (recommended)
@@ -381,6 +401,17 @@ byteforge encrypt --file input.bin --export-key sample.key --output sample.bf
 byteforge encrypt --file input.bin --password-stdin \
   --aad "context=v1" --output sample.bf
 
+# Raw standard AES-256-CBC with a zero IV (WinCrypt-style interoperability)
+byteforge encrypt --file calc.bin --cipher aes-256-cbc-raw \
+  --key 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f \
+  --no-container --zero-iv --allow-legacy \
+  --renderer c-array --symbol payload --output payload.c
+
+# Raw authenticated output without BFRG framing
+byteforge encrypt --file input.bin --cipher aes-256-gcm \
+  --key 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f \
+  --no-container --output raw.bin
+
 # Directly usable source declaration (key included automatically)
 printf '%s' "$PASSWORD" | byteforge encrypt --file input.bin \
   --password-stdin --renderer c-array --symbol payload --output payload.c
@@ -392,19 +423,22 @@ printf '%s' "$PASSWORD" | byteforge encrypt --file input.bin \
 byteforge decrypt [key source] [options]
 ```
 
-Strictly parses a `BFRG` v1 container and decrypts it. Authentication is verified **before** any
-plaintext is returned or written.
+Strictly parses a `BFRG` v1 container and decrypts it. With `--no-container`, treats the input as
+a raw `nonce/IV || ciphertext || tag` payload instead. Authentication is verified **before** any
+plaintext is returned or written for authenticated ciphers; `aes-256-cbc-raw` only checks padding.
 
-| Option                                              | Description                                |
-| --------------------------------------------------- | ------------------------------------------ |
-| `--password`, `--password-file`, `--password-stdin` | Password source                            |
-| `--key HEX`, `--key-file FILE`                      | Explicit key source                        |
-| `--aad TEXT`                                        | AAD used at encryption                     |
-| `--allow-legacy`                                    | Permit legacy algorithms (currently `rc4`) |
-| `--renderer NAME`                                   | Output renderer (default: `raw`)           |
-| `--pad MODE`                                        | Pad the plaintext after decryption         |
-| `--pad-to N`                                        | Padding multiple (default: 16)             |
-| `--no-verify`                                       | Skip re-encryption verification            |
+| Option                                              | Description                                          |
+| --------------------------------------------------- | ---------------------------------------------------- |
+| `--password`, `--password-file`, `--password-stdin` | Password source (container mode only)                |
+| `--key HEX`, `--key-file FILE`                      | Explicit key source                                  |
+| `--cipher NAME`                                     | Cipher used for raw input (required with `--no-container`) |
+| `--no-container`                                    | Treat input as raw nonce/IV ‖ ciphertext ‖ tag       |
+| `--aad TEXT`                                        | AAD used at encryption (container mode only)         |
+| `--allow-legacy`                                    | Permit legacy algorithms (`rc4`, `aes-256-cbc-raw`)  |
+| `--renderer NAME`                                   | Output renderer (default: `raw`)                     |
+| `--pad MODE`                                        | Pad the plaintext after decryption                   |
+| `--pad-to N`                                        | Padding multiple (default: 16)                       |
+| `--no-verify`                                       | Skip re-encryption verification                      |
 
 ```bash
 printf '%s' "$PASSWORD" | byteforge decrypt --file sample.bf \
@@ -413,6 +447,11 @@ printf '%s' "$PASSWORD" | byteforge decrypt --file sample.bf \
 byteforge decrypt --file sample.bf \
   --key 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f \
   --output recovered.bin
+
+# Raw CBC: the key must be supplied explicitly; there is no stored salt or cipher id
+byteforge decrypt --file payload.bin --cipher aes-256-cbc-raw \
+  --key 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f \
+  --no-container --allow-legacy --output recovered.bin
 ```
 
 ### `transform` / `untransform`
@@ -575,9 +614,15 @@ Grouped separately from cryptography because XOR is not encryption.
 | `aes-256-cbc`       | Compatibility (HMAC-SHA256)            | 32          | 16               | 32          |
 | `aes-256-ctr`       | Compatibility (HMAC-SHA256)            | 32          | 16               | 32          |
 | `rc4`               | Legacy (HMAC-SHA256; `--allow-legacy`) | 32          | 16               | 32          |
+| `aes-256-cbc-raw`   | Legacy, raw only (`--allow-legacy`)    | 32          | 16               | 0           |
 
 CBC and CTR are wrapped with encrypt-then-MAC using HKDF-SHA256-derived subkeys. Authentication is
 verified before decryption. RC4 is obsolete and cannot be selected without `--allow-legacy`.
+
+`aes-256-cbc-raw` is standard AES-256-CBC with a direct key, PKCS#7 padding, an IV prefix, and no
+tag. It requires `--no-container` and cannot be stored in a BFRG container. Its output is exactly
+`IV || ciphertext`, suitable for consumers such as WinCrypt. Because it is unauthenticated, a
+modified ciphertext or wrong key is detected only as invalid padding, if at all.
 
 ### Renderers
 
@@ -620,7 +665,9 @@ required so the ciphertext is not left unrecoverable.
 
 Password-based encryption uses scrypt (N=2^15, r=8, p=1, 16-byte salt) and derives the selected
 cipher's key size: 32 bytes for AES-256 and ChaCha20-Poly1305, 16 bytes for AES-128-GCM. The salt
-is stored in the container.
+is stored in the container. Raw mode has nowhere to store the salt, so password-based raw
+encryption requires a key-capable renderer or `--export-key FILE`; raw decryption always requires
+an explicit key.
 
 Keys are never printed in summaries or diagnostic text. They appear only in the payload of
 key-capable renderers or an explicitly requested `--export-key` file. Exported key files are
@@ -763,7 +810,8 @@ list every registered value, for example:
 
 ## Security notes
 
-- **Authenticated encryption is the default.** Do not use XOR or RC4 for confidentiality.
+- **Authenticated encryption is the default.** Do not use XOR, RC4, or raw CBC for confidentiality.
+  `aes-256-cbc-raw` has no integrity protection and is intended only for interoperability.
 - **Entropy is descriptive only.** It is not evidence of safety or correctness.
 - **Avoid `--password` on shared systems.** It may be visible in the process list; prefer
   `--password-file` or `--password-stdin`.

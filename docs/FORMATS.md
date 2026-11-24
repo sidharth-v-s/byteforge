@@ -167,6 +167,7 @@ must never change.
 | `aes-256-cbc`       | 4   | 32  | 16       | 32  | Compatibility             |
 | `aes-256-ctr`       | 5   | 32  | 16       | 32  | Compatibility             |
 | `rc4`               | 6   | 32  | 16       | 32  | Legacy (`--allow-legacy`) |
+| `aes-256-cbc-raw`   | 7   | 32  | 16       | 0   | Legacy, raw-only          |
 
 All primitives come from maintained implementations: `crypto/aes`,
 `crypto/cipher`, `crypto/rc4`, and
@@ -222,6 +223,27 @@ verification failure but is not reachable without a valid tag.
 RC4 is obsolete. It is disabled unless `--allow-legacy` is supplied, and the
 CLI prints a warning. CBC and CTR are compatibility modes; prefer AES-GCM for
 new data.
+
+### 3.3 Raw interop cipher: AES-256-CBC without authentication
+
+`aes-256-cbc-raw` is plain, standard AES-256-CBC intended for consumers that
+expect raw ciphertext and cannot process the ByteForge HKDF/HMAC construction:
+
+- Key: 32 bytes, used directly. There is no HKDF subkey derivation.
+- IV: 16 bytes. It is prefixed to the ciphertext rather than stored in a
+  container header.
+- Padding: PKCS#7 to a multiple of 16 bytes, always adding at least one block.
+- Tag: none. The mode is unauthenticated and does not support `--aad`.
+- Output layout: `IV (16) || ciphertext`.
+- Availability: requires both `--no-container` and `--allow-legacy`.
+
+Because there is no tag, decryption only validates block length and PKCS#7
+padding. A modified ciphertext, a wrong key, or a modified IV produces garbage
+or a padding error, never a cryptographic integrity failure. Treat raw CBC as
+untrusted input and prefer `aes-256-gcm` for any new data.
+
+`aes-256-cbc-raw` has tag size 0 and therefore cannot be stored in a `BFRG`
+container. The CLI rejects it unless `--no-container` is present.
 
 ---
 
@@ -304,6 +326,11 @@ described in §3.2.
 | `aes-256-gcm`, `aes-128-gcm`, `chacha20-poly1305` | equal to plaintext length                              | 16      |
 | `aes-256-cbc`                                     | next multiple of 16, always at least one padding block | 32      |
 | `aes-256-ctr`, `rc4`                              | equal to plaintext length                              | 32      |
+| `aes-256-cbc-raw`                                 | next multiple of 16, always at least one padding block | 0       |
+
+The `aes-256-cbc-raw` row is shown for completeness only. A tag length of 0 is
+not valid in a container header, so this cipher is accepted only in raw mode
+(`--no-container`).
 
 ### 5.3 Parser rules
 
@@ -337,6 +364,41 @@ failures never write plaintext.
 - Unknown versions, flags, IDs, and reserved values are rejected, not guessed.
 - `inspect` parses containers strictly whenever the input starts with `BFRG`;
   it does not fall back to generic inspection for a malformed container.
+
+### 5.5 Raw output (`--no-container`)
+
+`--no-container` writes the cipher output without `BFRG` framing:
+
+```text
+nonce/IV (N) || ciphertext (C) || tag (T)
+```
+
+`T` is omitted when the cipher has tag size 0. There is no magic, version,
+algorithm ID, KDF ID, salt, length field, or AAD. For `aes-256-cbc-raw` this is
+exactly `IV (16) || ciphertext`, which can be decrypted by standard AES-CBC
+consumers.
+
+| Cipher              | Raw layout                       | Key source for decryption       |
+| ------------------- | -------------------------------- | ------------------------------- |
+| `aes-256-gcm`       | nonce (12) ‖ ciphertext ‖ tag (16) | explicit key                    |
+| `aes-128-gcm`       | nonce (12) ‖ ciphertext ‖ tag (16) | explicit key                    |
+| `chacha20-poly1305` | nonce (12) ‖ ciphertext ‖ tag (16) | explicit key                    |
+| `aes-256-cbc`       | IV (16) ‖ ciphertext ‖ tag (32)   | explicit key                    |
+| `aes-256-ctr`       | IV (16) ‖ ciphertext ‖ tag (32)   | explicit key                    |
+| `rc4`               | IV (16) ‖ ciphertext ‖ tag (32)   | explicit key                    |
+| `aes-256-cbc-raw`   | IV (16) ‖ ciphertext             | explicit key                    |
+
+Raw output carries no KDF salt, so password-based decryption is impossible.
+Decryption requires `--no-container`, the `--cipher` name, and an explicit
+`--key` or `--key-file`. A password may be used at encryption time only when
+the derived key is retained: use a key-capable renderer or `--export-key FILE`.
+`--aad` is rejected in raw mode because there is no header to bind it to.
+
+Raw mode changes framing only, not cipher semantics. `aes-256-cbc`,
+`aes-256-ctr`, and `rc4` still use the HKDF-SHA256 subkey construction and
+append their HMAC tag. For those ciphers the emitted key is the base key, not
+the encryption key, and standard AES-CBC code cannot use it directly. Use
+`aes-256-cbc-raw` for direct-key standard CBC.
 
 ---
 
@@ -436,7 +498,10 @@ output ambiguous; use `--export-key FILE` with those renderers.
 
 For password-based encryption the rendered key is the scrypt output, not the
 password. Code using it directly must read the container's salt, nonce,
-ciphertext, and tag and skip the KDF step.
+ciphertext, and tag and skip the KDF step. In raw mode (`--no-container`) the
+salt is not written at all, so a password-based encryption requires a
+key-capable renderer or `--export-key FILE`; raw decryption always requires an
+explicit key.
 
 ### 6.5 `json` schema 1.0
 

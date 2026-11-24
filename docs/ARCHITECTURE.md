@@ -73,7 +73,7 @@ Responsibility boundaries:
 | `internal/bytesutil` | Loose but strict hexadecimal parsing |
 | `internal/cli` | Command dispatch, flags, usage text, orchestration, reports |
 | `internal/codec` | Representation codec registry and implementations |
-| `internal/container` | `BFRG` v1 header, serializer, strict parser, AAD construction |
+| `internal/container` | `BFRG` v1 header, serializer, strict parser, AAD construction, raw payload helpers |
 | `internal/cryptography` | Cipher registry, AEAD adapters, compat HMAC construction, KDF |
 | `internal/fsutil` | `O_EXCL` writes, atomic forced replacement, existence checks |
 | `internal/input` | File/hex loading, 64 MiB default limit, labels |
@@ -191,15 +191,21 @@ validate cipher (legacy gate) -> validate renderer/output/export path
        password -> fresh 16-byte salt -> scrypt -> cipher-sized key
        explicit key -> exact key-size check
        none -> random key; key-capable renderers include it, otherwise --export-key
-  -> nonce: explicit (test/interop, warned) or fresh CSPRNG bytes
-  -> build header with ciphertext length and tag size
-  -> AAD = fixed header || salt || nonce || --aad
-  -> cipher.Encrypt
-  -> header.Encode(ciphertext, tag)
+  -> nonce: --zero-iv, explicit (test/interop, warned), or fresh CSPRNG bytes
+  -> raw mode (--no-container):
+       reject --aad; require tag size 0 ciphers to use raw mode
+       cipher.Encrypt(key, nonce, plaintext, nil)
+       container.EncodeRaw(nonce, ciphertext, tag)
+     container mode:
+       build header with ciphertext length and tag size
+       AAD = fixed header || salt || nonce || --aad
+       cipher.Encrypt
+       header.Encode(ciphertext, tag)
   -> optional internal decrypt + plaintext comparison
-  -> optional key export (never for passwords)
-  -> key-capable renderer: renderer.RenderWithKey(container, key)
-     otherwise: renderer.Render(container)
+  -> optional key export (not for passwords in container mode; allowed in raw
+     mode so the derived key remains recoverable without a salt)
+  -> key-capable renderer: renderer.RenderWithKey(payload, key)
+     otherwise: renderer.Render(payload)
   -> write stdout or file
   -> summary to stderr
 ```
@@ -207,20 +213,28 @@ validate cipher (legacy gate) -> validate renderer/output/export path
 ### 4.4 `decrypt`
 
 ```text
-validate -> load container -> strict container.Parse(bounded by --max-input)
-  -> resolve cipher by ID, gate legacy algorithms
-  -> select key source from stored KDF ID:
-       none -> explicit key only
-       scrypt -> password only, derive with stored salt
-  -> AAD = parsed prefix || --aad
-  -> cipher.Decrypt (authentication first)
+validate -> load input
+  -> raw mode (--no-container):
+       require explicit --cipher and --key/--key-file
+       container.SplitRaw(input, cipher nonce size, cipher tag size)
+       AAD is empty; --aad is rejected
+     container mode:
+       strict container.Parse(bounded by --max-input)
+       resolve cipher by ID, gate legacy algorithms
+       select key source from stored KDF ID:
+         none -> explicit key only
+         scrypt -> password only, derive with stored salt
+       AAD = parsed prefix || --aad
+  -> cipher.Decrypt (authentication first where the cipher has a tag)
   -> optional re-encrypt and compare ciphertext/tag
   -> explicit padding after decryption (--pad/--pad-to)
   -> render plaintext -> write -> summary
 ```
 
 No plaintext is rendered or written until `Decrypt` succeeds. The optional
-re-encryption check catches adapters that decrypt inconsistently.
+re-encryption check catches adapters that decrypt inconsistently. Raw CBC is
+unauthenticated: a wrong key or modified ciphertext may surface only as a
+padding error.
 
 ### 4.5 `transform` / `untransform`
 
@@ -368,10 +382,13 @@ if an adapter returns a lower-level error. This keeps exit code 4 stable.
 3. Validate key and nonce sizes in both directions.
 4. Return the exact ciphertext length from `CiphertextLen` before encryption.
 5. If the mode is not an AEAD, add an authenticated construction and verify it
-   before decrypting. Do not expose a bare unauthenticated mode.
+   before decrypting. Do not expose a bare unauthenticated mode. The only
+   exception is `aes-256-cbc-raw`, which has tag size 0, is legacy-gated, and
+   is rejected unless `--no-container` is used.
 6. Classify it as authenticated, compatibility, or legacy. Legacy ciphers must
    require `--allow-legacy`.
 7. Add round-trip, tamper, wrong-key, wrong-nonce, wrong-AAD, and vector tests.
+   For a raw-only cipher, also add container-mode rejection and raw split tests.
 
 ### Adding a renderer
 
